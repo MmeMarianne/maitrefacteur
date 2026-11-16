@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Maître Facteur – Tranche les nombres</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#101a33;font-family:system-ui,Segoe UI,Arial,sans-serif;color:#fff;touch-action:none;user-select:none}
+  canvas{display:block;width:100%;height:100%}
+  .ov{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(10,16,35,.88);text-align:center;padding:16px;overflow:auto}
+  .ov.hide{display:none}
+  h1{margin:0 0 6px;font-size:clamp(28px,6vw,52px)}
+  p{max-width:620px;line-height:1.45;margin:6px 0}
+  button{font-size:20px;padding:12px 26px;margin:6px;border:0;border-radius:12px;background:#e94f4f;color:#fff;font-weight:700;cursor:pointer}
+  button.alt{background:#3b5bdb}
+  input{font-size:20px;padding:10px;border-radius:10px;border:0;text-align:center;margin:6px}
+  #pause{position:fixed;top:10px;right:10px;font-size:18px;padding:8px 14px;z-index:2}
+  ol{text-align:left;padding-left:30px;margin:6px 0}
+  .tag{color:#ffd166;font-weight:700}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="pause" class="alt hide">⏸ Pause</button>
+
+<div id="menu" class="ov">
+  <h1>🥷 Maître Facteur</h1>
+  <p>Des nombres sont lancés dans les airs. <b>Tranche</b> ceux qui peuvent être factorisés : ils se coupent en deux facteurs. Continue jusqu’à ce qu’il ne reste que des <span class="tag">nombres premiers</span>.</p>
+  <p>⚠️ Ne tranche <b>jamais</b> un nombre premier (2, 3, 5, 7, 11, 13…) : tu perds une vie !</p>
+  <p>Choisis ton niveau :</p>
+  <div>
+    <button data-lv="app">Apprenti (≤ 50)</button>
+    <button data-lv="int">Intermédiaire (≤ 100)</button>
+    <button data-lv="mai">Maître (≤ 300)</button>
+  </div>
+  <button id="lbBtn" class="alt hide">🏆 Classement du groupe</button>
+  <p style="font-size:14px;opacity:.7">Glisse le doigt ou la souris pour trancher.</p>
+</div>
+
+<div id="lb" class="ov hide">
+  <h1>🏆 Classement</h1>
+  <div id="lbBody" style="display:flex;flex-wrap:wrap;justify-content:center"></div>
+  <button id="lbBack" class="alt">Retour</button>
+</div>
+
+<div id="over" class="ov hide">
+  <h1>Partie terminée</h1>
+  <p id="res"></p>
+  <div id="nameBox" class="hide"><input id="name" maxlength="14" placeholder="Ton prénom"><button id="send" class="alt">Envoyer mon score</button></div>
+  <div id="board"></div>
+  <div><button id="again">Rejouer</button><button id="toMenu" class="alt">Menu</button></div>
+</div>
+
+<div id="pz" class="ov hide"><h1>Pause</h1><button id="resume">Continuer</button><button id="quit" class="alt">Quitter</button></div>
+
+<script>
+// ====== CONFIG FIREBASE (facultatif) ======
+// Colle ici l’URL de ta Realtime Database, ex. "https://mon-projet-default-rtdb.firebaseio.com"
+// Laisse vide pour jouer sans classement.
+const DB_URL = "https://slicesamourai-default-rtdb.firebaseio.com";
+// Nom de ton groupe (ex. "classe-5A"). Pour avoir plusieurs groupes avec le même fichier,
+// ajoute ?g=nom-du-groupe à l’adresse du jeu (ex. .../index.html?g=classe-5B)
+const GROUPE_DEFAUT = "ma-classe";
+const GROUPE = ((new URLSearchParams(location.search).get('g')||GROUPE_DEFAUT).replace(/[.$#\[\]\/\s]/g,'-'))||'classe';
+// ==========================================
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, DPR;
+function resize(){DPR=window.devicePixelRatio||1;W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0)}
+addEventListener('resize',resize);resize();
+
+// spd = vitesse des nombres, spawn = délai de départ entre lancers (s), min = délai minimal, dbl = chance de lancer 2 nombres
+const LEVELS={
+  app:{max:50, nom:'Apprenti',      spd:.6, spawn:1.8, min:1.2, dbl:.1},
+  int:{max:100,nom:'Intermédiaire', spd:.9, spawn:1.3, min:.8,  dbl:.3},
+  mai:{max:300,nom:'Maître',        spd:1.25,spawn:1.0, min:.55, dbl:.45}
+};
+const MISS_PENALTY=5; // points perdus quand un nombre composé tombe
+const gravity=()=>H*1.2*Math.pow(LEVELS[lvKey].spd,2);
+const isPrime=n=>{if(n<2)return false;for(let i=2;i*i<=n;i++)if(n%i===0)return false;return true};
+const rnd=(a,b)=>a+Math.random()*(b-a);
+const COLORS=['#f4a261','#2a9d8f','#e9c46a','#8ecae6','#c77dff','#90be6d','#ff8fa3'];
+
+let lvKey='app', items=[], texts=[], trail=[], score=0, lives=3, spawnT=0, elapsed=0, state='menu', last=0, drawing=false, swipeCuts=0;
+const best=()=>+localStorage.getItem('mf_best_'+lvKey)||0;
+
+function pickNumber(){
+  const max=LEVELS[lvKey].max, wantPrime=Math.random()<0.38;
+  for(let k=0;k<200;k++){
+    const n=Math.floor(rnd(2,max+1));
+    if(isPrime(n)===wantPrime && (wantPrime||n>=4)) return n;
+  }
+  return 4;
+}
+function makeItem(n,x,y,vx,vy){
+  return {n,x,y,vx,vy,r:30+String(n).length*8,rot:rnd(-1,1),col:COLORS[Math.floor(Math.random()*COLORS.length)],cut:false,safeSwipe:-1,noCut:0};
+}
+function launch(){
+  const n=pickNumber(), x=rnd(W*.15,W*.85), g=gravity();
+  const vy=-Math.sqrt(2*g*H*rnd(.55,.8)), vx=(W/2-x)/(2.2/LEVELS[lvKey].spd)*rnd(.2,1);
+  items.push(makeItem(n,x,H+60,vx,vy));
+}
+function start(k){
+  lvKey=k;items=[];texts=[];trail=[];score=0;lives=3;spawnT=0;elapsed=0;state='play';last=performance.now();
+  show('menu',0);show('over',0);show('pz',0);document.getElementById('pause').classList.remove('hide');
+}
+function show(id,v){document.getElementById(id).classList.toggle('hide',!v)}
+
+function divisors(n){const d=[];for(let i=2;i<=n/2;i++)if(n%i===0)d.push(i);return d}
+function slice(it){
+  it.cut=true;
+  if(isPrime(it.n)){
+    lives--;swipeCuts=0;
+    texts.push({t:`${it.n} est premier !`,x:it.x,y:it.y,life:1.4,col:'#ff6b6b'});
+    flash=0.35;
+    if(lives<=0)gameOver();
+    return;
+  }
+  const ds=divisors(it.n), a=ds[Math.floor(Math.random()*ds.length)], b=it.n/a;
+  swipeCuts++;
+  score+=10+5*(swipeCuts-1);
+  texts.push({t:`${it.n} = ${a} × ${b}`,x:it.x,y:it.y-it.r,life:1.4,col:'#ffd166'});
+  const pa=makeItem(a,it.x-it.r/2,it.y,it.vx-180,it.vy*.4-60);
+  const pb=makeItem(b,it.x+it.r/2,it.y,it.vx+180,it.vy*.4-60);
+  for(const p of [pa,pb]){p.safeSwipe=swipeId;p.noCut=.3;items.push(p)}
+}
+let flash=0;
+
+function segDist(px,py,x1,y1,x2,y2){
+  const dx=x2-x1,dy=y2-y1,l=dx*dx+dy*dy;
+  let t=l?((px-x1)*dx+(py-y1)*dy)/l:0;t=Math.max(0,Math.min(1,t));
+  return Math.hypot(px-(x1+t*dx),py-(y1+t*dy));
+}
+function pt(e){return{x:e.clientX,y:e.clientY,t:performance.now()}}
+let swipeId=0;
+cv.addEventListener('pointerdown',e=>{if(state!=='play')return;swipeId++;drawing=true;swipeCuts=0;trail=[pt(e)];cv.setPointerCapture(e.pointerId)});
+cv.addEventListener('pointermove',e=>{
+  if(!drawing||state!=='play')return;
+  const p=pt(e),q=trail[trail.length-1];trail.push(p);
+  for(const it of items.slice()){
+    if(!it.cut&&it.safeSwipe!==swipeId&&it.noCut<=0&&segDist(it.x,it.y,q.x,q.y,p.x,p.y)<it.r&&Math.hypot(p.x-q.x,p.y-q.y)>4){slice(it);if(state!=='play')break}
+  }
+  items=items.filter(i=>!i.cut);
+});
+const endDraw=()=>{drawing=false;swipeCuts=0};
+cv.addEventListener('pointerup',endDraw);cv.addEventListener('pointercancel',endDraw);
+
+function update(dt){
+  elapsed+=dt;spawnT-=dt;
+  const L=LEVELS[lvKey];
+  const rate=Math.max(L.min,L.spawn-elapsed*.006);
+  if(spawnT<=0){launch();if(Math.random()<L.dbl)launch();spawnT=rate}
+  const g=gravity();
+  for(const it of items){it.vy+=g*dt;it.x+=it.vx*dt;it.y+=it.vy*dt;if(it.noCut>0)it.noCut-=dt}
+  items=items.filter(i=>{
+    if(i.y>H+90&&i.vy>0){
+      if(!i.cut&&!isPrime(i.n)&&score>0){
+        score=Math.max(0,score-MISS_PENALTY);
+        texts.push({t:`−${MISS_PENALTY}  (${i.n} n’est pas premier)`,x:i.x,y:H-30,life:1.2,col:'#ff9f6b'});
+      }
+      return false;
+    }
+    return true;
+  });
+  for(const t of texts){t.life-=dt;t.y-=20*dt}
+  texts=texts.filter(t=>t.life>0);
+  const now=performance.now();trail=trail.filter(p=>now-p.t<180);
+  flash=Math.max(0,flash-dt);
+}
+function draw(){
+  const gr=ctx.createLinearGradient(0,0,0,H);gr.addColorStop(0,'#1d2b53');gr.addColorStop(1,'#0b1228');
+  ctx.fillStyle=gr;ctx.fillRect(0,0,W,H);
+  for(const it of items){
+    ctx.beginPath();ctx.arc(it.x,it.y,it.r,0,7);ctx.fillStyle=it.col;ctx.fill();
+    ctx.lineWidth=4;ctx.strokeStyle='rgba(255,255,255,.7)';ctx.stroke();
+    ctx.fillStyle='#10213f';ctx.font=`bold ${it.r*.95}px system-ui`;ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText(it.n,it.x,it.y+2);
+  }
+  ctx.lineCap='round';
+  for(let i=1;i<trail.length;i++){
+    const a=1-(performance.now()-trail[i].t)/180;
+    ctx.strokeStyle=`rgba(255,255,255,${Math.max(0,a)})`;ctx.lineWidth=8*Math.max(.2,a);
+    ctx.beginPath();ctx.moveTo(trail[i-1].x,trail[i-1].y);ctx.lineTo(trail[i].x,trail[i].y);ctx.stroke();
+  }
+  ctx.font='bold 24px system-ui';
+  for(const t of texts){ctx.globalAlpha=Math.min(1,t.life);ctx.fillStyle=t.col;ctx.textAlign='center';ctx.fillText(t.t,Math.max(120,Math.min(W-120,t.x)),t.y)}
+  ctx.globalAlpha=1;
+  ctx.fillStyle='#fff';ctx.textAlign='left';ctx.font='bold 28px system-ui';
+  ctx.fillText('Score : '+score,16,34);
+  ctx.font='26px system-ui';ctx.fillText('❤️'.repeat(Math.max(0,lives))+'🖤'.repeat(3-Math.max(0,lives)),16,70);
+  ctx.font='16px system-ui';ctx.globalAlpha=.7;ctx.fillText('Niveau : '+LEVELS[lvKey].nom+'  •  Record : '+best(),16,98);ctx.globalAlpha=1;
+  if(flash>0){ctx.fillStyle=`rgba(255,0,0,${flash})`;ctx.fillRect(0,0,W,H)}
+}
+function loop(now){
+  const dt=Math.min(.05,(now-last)/1000);last=now;
+  if(state==='play')update(dt);
+  draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(t=>{last=t;loop(t)});
+
+// ===== Fin de partie & classement =====
+async function gameOver(){
+  state='over';document.getElementById('pause').classList.add('hide');
+  const nb=best();if(score>nb)localStorage.setItem('mf_best_'+lvKey,score);
+  document.getElementById('res').innerHTML=`Score : <b>${score}</b> ${score>nb?'🎉 Nouveau record !':'(record : '+nb+')'}`;
+  document.getElementById('name').value=localStorage.getItem('mf_name')||'';
+  show('nameBox',!!DB_URL&&score>0);
+  document.getElementById('board').innerHTML='';
+  show('over',1);
+  if(DB_URL)loadBoard();
+}
+const esc=s=>String(s).replace(/[<>&"]/g,'');
+async function fetchTop(k){
+  const r=await fetch(`${DB_URL}/scores/${GROUPE}/${k}.json?orderBy=${encodeURIComponent('"score"')}&limitToLast=5`);
+  const d=await r.json()||{};
+  return Object.values(d).sort((a,b)=>b.score-a.score);
+}
+function listHtml(k,rows){
+  const me=(localStorage.getItem('mf_name')||'').toLowerCase();
+  const medals=['🥇','🥈','🥉','4.','5.'];
+  return `<h3>🏆 ${LEVELS[k].nom}</h3>`+(rows.length?'<div style="text-align:left">'+rows.map((x,i)=>
+    `<div style="${String(x.name).toLowerCase()===me?'color:#ffd166;font-weight:700':''}">${medals[i]} ${esc(x.name)} – ${x.score}</div>`).join('')+'</div>':'<div style="opacity:.6">Aucun score</div>');
+}
+async function loadBoard(){
+  const box=document.getElementById('board');
+  try{box.innerHTML=listHtml(lvKey,await fetchTop(lvKey))}
+  catch(e){box.textContent='Classement indisponible.'}
+}
+async function openLb(){
+  show('menu',0);show('lb',1);
+  const box=document.getElementById('lbBody');box.textContent='Chargement…';
+  try{
+    const all=await Promise.all(Object.keys(LEVELS).map(fetchTop));
+    box.innerHTML=Object.keys(LEVELS).map((k,i)=>`<div style="min-width:200px;margin:8px 16px">${listHtml(k,all[i])}</div>`).join('');
+  }catch(e){box.textContent='Classement indisponible.'}
+}
+document.getElementById('send').onclick=async()=>{
+  const name=document.getElementById('name').value.trim().slice(0,14)||'Anonyme';
+  localStorage.setItem('mf_name',name);show('nameBox',0);
+  const key=name.toLowerCase().replace(/[.$#\[\]\/\s]/g,'_')||'anonyme';
+  const url=`${DB_URL}/scores/${GROUPE}/${lvKey}/${key}.json`;
+  try{
+    const old=await (await fetch(url)).json();
+    if(!old||old.score<score)await fetch(url,{method:'PUT',body:JSON.stringify({name,score,t:Date.now()})});
+  }catch(e){}
+  loadBoard();
+};
+
+// ===== Boutons =====
+document.querySelectorAll('[data-lv]').forEach(b=>b.onclick=()=>start(b.dataset.lv));
+if(DB_URL)document.getElementById('lbBtn').classList.remove('hide');
+document.getElementById('lbBtn').onclick=openLb;
+document.getElementById('lbBack').onclick=()=>{show('lb',0);show('menu',1)};
+document.getElementById('again').onclick=()=>start(lvKey);
+document.getElementById('toMenu').onclick=()=>{show('over',0);show('menu',1);state='menu'};
+document.getElementById('pause').onclick=()=>{if(state==='play'){state='pause';show('pz',1)}};
+document.getElementById('resume').onclick=()=>{show('pz',0);state='play';last=performance.now()};
+document.getElementById('quit').onclick=()=>{show('pz',0);document.getElementById('pause').classList.add('hide');show('menu',1);state='menu'};
+addEventListener('keydown',e=>{if(e.key==='Escape'&&state==='play'){state='pause';show('pz',1)}});
+</script>
+</body>
+</html>
